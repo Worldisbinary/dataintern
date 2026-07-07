@@ -1,6 +1,6 @@
 """
 AllDoors Intelligence — RAG Chatbot for CRM & Business Data
-API key: Streamlit Cloud Secrets → GEMINI_API_KEY (never shown in UI)
+API key: Streamlit Cloud Secrets → RAPIDAPI_KEY (never shown in UI)
 """
 
 import json, re, textwrap, time
@@ -23,7 +23,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Minimal CSS — only for things config.toml can't do
 st.markdown("""
 <style>
 [data-testid="collapsedControl"] { display: none !important; }
@@ -44,11 +43,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── constants ─────────────────────────────────────────────────
-EMBED_MODEL  = "all-MiniLM-L6-v2"
-CHUNK_SIZE   = 400; OVERLAP = 80; TOP_K = 8
-CHART_KW     = ["chart","plot","graph","bar","pie","line","scatter",
-                 "histogram","show","compare","distribution","trend","visuali"]
-MAX_RETRIES  = 3
+EMBED_MODEL = "all-MiniLM-L6-v2"
+CHUNK_SIZE  = 400; OVERLAP = 80; TOP_K = 8
+CHART_KW    = ["chart","plot","graph","bar","pie","line","scatter",
+                "histogram","show","compare","distribution","trend","visuali"]
 
 for k,v in {"chunks":[],"index":None,"embeddings":None,
              "history":[],"dataframes":{},"ready":False,"embed_model":None}.items():
@@ -116,29 +114,29 @@ def retrieve(q,model,idx,emb,chunks):
     scores,ids=idx.search(qe,TOP_K)
     return [{**chunks[i],"score":float(s)} for s,i in zip(scores[0],ids[0]) if i>=0]
 
+# ── LLM via RapidAPI GPT-4 ────────────────────────────────────
 def ask(question, ctx, history):
-    context = "\n\n---\n\n".join(
+    context="\n\n---\n\n".join(
         f"[SOURCE {i+1}: {c['source']}"+(f" | {','.join(f'{k}:{v}' for k,v in c['meta'].items())}" if c['meta'] else "")+f"]\n{c['text']}"
         for i,c in enumerate(ctx))
-    hist = [
-        {"role": t["role"], "content": t["content"]}
-        for t in history[-6:]
-    ]
-    system = (
+    hist=[{"role":t["role"],"content":t["content"]} for t in history[-6:]]
+    system=(
         "You are AllDoors Intelligence, a precise real estate and business data analyst. "
         "Answer ONLY from the provided sources. "
         "If the answer is not there say: I don't see that information in the uploaded files. "
         "Cite every fact with [SOURCE N]. "
-        "For chart requests include a JSON block: ```chart {\"type\":\"bar\",\"x\":\"column\",\"y\":\"column\",\"source\":\"filename\"} ```"
+        'For chart requests include: ```chart {"type":"bar","x":"column","y":"column","source":"filename"} ```'
     )
-    messages = [{"role": "system", "content": system}] + hist + [
-        {"role": "user", "content": f"SOURCES:\n{context}\n\nQUESTION: {question}"}
+    messages=[{"role":"system","content":system}]+hist+[
+        {"role":"user","content":f"SOURCES:\n{context}\n\nQUESTION: {question}"}
     ]
+    # Read key from secrets
+    rapidapi_key=""
+    try: rapidapi_key=st.secrets.get("RAPIDAPI_KEY","")
+    except: pass
+
     try:
-        rapidapi_key = ""
-        try: rapidapi_key = st.secrets.get("RAPIDAPI_KEY", "")
-        except: pass
-        response = requests.post(
+        response=requests.post(
             "https://chatgpt-42.p.rapidapi.com/conversationgpt4-2",
             headers={
                 "x-rapidapi-key": rapidapi_key,
@@ -156,11 +154,16 @@ def ask(question, ctx, history):
             },
             timeout=30,
         )
-        data = response.json()
-        return data.get("result", data.get("message", str(data)))
+        data=response.json()
+        # Handle different response formats
+        if "result" in data: return data["result"]
+        if "message" in data: return data["message"]
+        if "choices" in data: return data["choices"][0]["message"]["content"]
+        return str(data)
     except Exception as e:
-        return f"**Error:** {str(e)[:200]}"
+        return f"**Error contacting API:** {str(e)[:300]}"
 
+# ── chart helpers ─────────────────────────────────────────────
 def wants_chart(q): return any(k in q.lower() for k in CHART_KW)
 
 def get_spec(answer):
@@ -200,14 +203,14 @@ def render_chart(question,answer):
     except: return None
 
 # ════════════════════════════════════════════════════════════
-# SIDEBAR — permanent, no collapse
+# SIDEBAR
 # ════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("# 🚪 AllDoors")
     st.markdown("**INTELLIGENCE**")
     st.divider()
 
-    # API key silent from secrets — reads RAPIDAPI_KEY, never shown
+    # Read RAPIDAPI_KEY from Streamlit secrets — never shown in UI
     _key=""
     try: _key=st.secrets.get("RAPIDAPI_KEY","")
     except: pass
@@ -230,7 +233,7 @@ with st.sidebar:
         label_visibility="collapsed")
 
     if files:
-        if st.button("⟳  Index Documents",use_container_width=True,type="primary"):
+        if st.button("Index Documents",use_container_width=True,type="primary"):
             model=load_embed(); all_chunks,bar=[],st.progress(0); status=st.empty()
             for i,f in enumerate(files):
                 ext=Path(f.name).suffix.lower(); parser=PARSERS.get(ext)
@@ -265,17 +268,14 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════
 # MAIN
 # ════════════════════════════════════════════════════════════
-
-# Hero
 st.markdown("---")
-col_h, col_spacer = st.columns([3,1])
+col_h,_=st.columns([3,1])
 with col_h:
     st.markdown("### ALLDOORS · REAL ESTATE INTELLIGENCE")
     st.markdown("# WE ARE TEAM C.")
     st.markdown("Ask questions about your CRM data. Get cited answers and live charts.")
 st.markdown("---")
 
-# Suggestions
 SUGGESTIONS=[
     "What was the total closed-won revenue?",
     "Who is the top rep by pipeline value?",
@@ -289,14 +289,12 @@ if not st.session_state["history"]:
     st.markdown("**SUGGESTED QUERIES**")
     c1,c2,c3=st.columns(3)
     for i,s in enumerate(SUGGESTIONS):
-        col=[c1,c2,c3][i%3]
-        with col:
+        with [c1,c2,c3][i%3]:
             if st.button(s,key=f"s{i}",use_container_width=True):
                 st.session_state["_q"]=s; st.rerun()
     st.markdown("---")
-    st.caption("Upload your documents in the sidebar → Index → ask anything below")
+    st.caption("Upload documents in the sidebar → Index → ask anything below")
 
-# Chat history
 for turn in st.session_state["history"]:
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
@@ -305,12 +303,11 @@ for turn in st.session_state["history"]:
         if turn.get("fig"):
             st.plotly_chart(turn["fig"],use_container_width=True)
 
-# Input
 question=st.chat_input("Ask about your data…") or st.session_state.pop("_q",None)
 
 if question:
     if not st.session_state["ready"]:
-        st.error("Add your Gemini API key in the sidebar.")
+        st.error("Add your RapidAPI key in the sidebar.")
         st.stop()
     if not st.session_state["chunks"]:
         st.error("Upload and index documents first.")
