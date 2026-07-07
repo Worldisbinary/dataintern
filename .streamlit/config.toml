@@ -1,0 +1,10 @@
+[theme]
+base = "dark"
+backgroundColor = "#141414"
+secondaryBackgroundColor = "#000000"
+textColor = "#E5E5E5"
+primaryColor = "#E50914"
+font = "sans serif"
+
+[ui]
+hideSidebarNav = false
