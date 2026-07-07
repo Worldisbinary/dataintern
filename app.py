@@ -13,8 +13,7 @@ import plotly.express as px
 import faiss
 import pdfplumber
 import docx
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+import requests
 from sentence_transformers import SentenceTransformer
 
 st.set_page_config(
@@ -118,31 +117,50 @@ def retrieve(q,model,idx,emb,chunks):
     scores,ids=idx.search(qe,TOP_K)
     return [{**chunks[i],"score":float(s)} for s,i in zip(scores[0],ids[0]) if i>=0]
 
-def ask(question,ctx,history):
-    context="\n\n---\n\n".join(
+def ask(question, ctx, history):
+    context = "\n\n---\n\n".join(
         f"[SOURCE {i+1}: {c['source']}"+(f" | {','.join(f'{k}:{v}' for k,v in c['meta'].items())}" if c['meta'] else "")+f"]\n{c['text']}"
         for i,c in enumerate(ctx))
-    hist="".join(f"{'User' if t['role']=='user' else 'Assistant'}: {t['content']}\n" for t in history[-6:])
-    prompt=textwrap.dedent(f"""
-        You are AllDoors Intelligence, a precise real estate and business data analyst.
-        Answer ONLY from the provided sources.
-        If the answer is not there say: "I don't see that information in the uploaded files."
-        Cite every fact with [SOURCE N].
-        For chart requests include:
-        ```chart
-        {{"type":"bar","x":"column","y":"column","source":"filename"}}
-        ```
-        HISTORY: {hist}
-        SOURCES: {context}
-        QUESTION: {question}
-        ANSWER:""").strip()
-    m=genai.GenerativeModel(GEMINI_MODEL)
-    for attempt in range(MAX_RETRIES):
-        try: return m.generate_content(prompt).text
-        except ResourceExhausted:
-            if attempt<MAX_RETRIES-1: time.sleep(15*(attempt+1))
-            else: return "**Rate limit reached.** Please wait 30–60 seconds and try again."
-        except Exception as e: return f"**Error:** {str(e)[:200]}"
+    hist = [
+        {"role": t["role"], "content": t["content"]}
+        for t in history[-6:]
+    ]
+    system = (
+        "You are AllDoors Intelligence, a precise real estate and business data analyst. "
+        "Answer ONLY from the provided sources. "
+        "If the answer is not there say: I don't see that information in the uploaded files. "
+        "Cite every fact with [SOURCE N]. "
+        "For chart requests include a JSON block: ```chart {\"type\":\"bar\",\"x\":\"column\",\"y\":\"column\",\"source\":\"filename\"} ```"
+    )
+    messages = [{"role": "system", "content": system}] + hist + [
+        {"role": "user", "content": f"SOURCES:\n{context}\n\nQUESTION: {question}"}
+    ]
+    try:
+        rapidapi_key = ""
+        try: rapidapi_key = st.secrets.get("RAPIDAPI_KEY", "")
+        except: pass
+        response = requests.post(
+            "https://chatgpt-42.p.rapidapi.com/conversationgpt4-2",
+            headers={
+                "x-rapidapi-key": rapidapi_key,
+                "x-rapidapi-host": "chatgpt-42.p.rapidapi.com",
+                "Content-Type": "application/json",
+            },
+            json={
+                "messages": messages,
+                "system_prompt": "",
+                "temperature": 0.3,
+                "top_k": 5,
+                "top_p": 0.9,
+                "max_tokens": 1024,
+                "web_search_enabled": False,
+            },
+            timeout=30,
+        )
+        data = response.json()
+        return data.get("result", data.get("message", str(data)))
+    except Exception as e:
+        return f"**Error:** {str(e)[:200]}"
 
 def wants_chart(q): return any(k in q.lower() for k in CHART_KW)
 
@@ -201,7 +219,7 @@ with st.sidebar:
                            label_visibility="collapsed")
         st.caption("Free → [aistudio.google.com](https://aistudio.google.com)")
     if _key:
-        genai.configure(api_key=_key)
+        pass  # key stored in secrets
         st.session_state["ready"]=True
 
     st.divider()
