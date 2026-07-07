@@ -66,7 +66,7 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"   # free, runs locally, 384-dim
 CHUNK_SIZE       = 400                    # characters per chunk
 CHUNK_OVERLAP    = 80
 TOP_K            = 8                      # chunks retrieved per query
-GEMINI_MODEL     = "gemini-1.5-flash"    # free-tier model
+GEMINI_MODEL     = "gemini-2.0-flash"    # free-tier model
 
 # Chart-request keywords — if any appear, we try to plot
 CHART_KEYWORDS = [
@@ -412,12 +412,9 @@ with st.sidebar:
     if api_key:
         try:
             genai.configure(api_key=api_key)
-            # Quick validation ping
-            genai.GenerativeModel(GEMINI_MODEL).generate_content("ping")
-            st.success("✅ API key valid")
             st.session_state["gemini_ready"] = True
         except Exception as e:
-            st.error(f"❌ Invalid key: {e}")
+            st.error(f"❌ Could not configure API: {e}")
             st.session_state["gemini_ready"] = False
 
     st.divider()
