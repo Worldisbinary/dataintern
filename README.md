@@ -19,7 +19,7 @@ A Retrieval-Augmented Generation (RAG) chatbot that ingests mixed business files
 
 ## Stack
 
-- **LLM:** Google Gemini 1.5 Flash (free tier — 15 req/min)
+- **LLM:** Google Gemini 2.0 Flash (free tier — 15 req/min)
 - **Embeddings:** `all-MiniLM-L6-v2` via sentence-transformers (runs locally, free)
 - **Vector search:** FAISS (in-memory, no server needed)
 - **UI:** Streamlit
@@ -29,7 +29,7 @@ A Retrieval-Augmented Generation (RAG) chatbot that ingests mixed business files
 ## Run locally
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/dataintern.git
+git clone https://github.com/Worldisbinary/dataintern
 cd dataintern
 pip install -r requirements.txt
 streamlit run app.py

@@ -4,7 +4,7 @@ API key: Streamlit Cloud Secrets only → GEMINI_API_KEY
 Never logged, printed, or shown in UI.
 """
 
-import json, re, textwrap
+import json, re, textwrap, time
 from pathlib import Path
 
 import streamlit as st
@@ -15,6 +15,7 @@ import faiss
 import pdfplumber
 import docx
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 from sentence_transformers import SentenceTransformer
 
 st.set_page_config(
@@ -26,327 +27,311 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Jost:wght@200;300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
 html, body, .stApp {
-  font-family: 'Jost', sans-serif;
+  background: #141414;
+  color: #E5E5E5;
+  font-family: 'Inter', sans-serif;
   font-weight: 300;
-  background: #F0EBE1;
-  color: #1C1A16;
 }
+
 #MainMenu, footer, header,
 [data-testid="stToolbar"],
 [data-testid="stDecoration"] { display: none !important; }
 
-/* ═══════════════════════════════════════
+/* ══════════════════════════════
    SIDEBAR
-═══════════════════════════════════════ */
+══════════════════════════════ */
 [data-testid="stSidebar"] {
-  background: #1C1A16;
-  border-right: none;
+  background: #000000;
+  border-right: 1px solid #222;
 }
 [data-testid="stSidebar"] > div:first-child {
-  padding: 36px 24px 32px;
+  padding: 32px 24px;
 }
 [data-testid="stSidebar"] * {
-  color: #E8E0D0 !important;
-  font-family: 'Jost', sans-serif !important;
+  font-family: 'Inter', sans-serif !important;
+  color: #E5E5E5 !important;
 }
 
-.sb-brand {
-  font-family: 'Cormorant Garamond', serif !important;
-  font-size: 1.4rem !important;
-  font-weight: 400 !important;
+.sb-logo {
+  font-family: 'Bebas Neue', sans-serif !important;
+  font-size: 1.6rem !important;
   letter-spacing: 0.12em;
-  color: #E8E0D0 !important;
-  text-transform: uppercase;
+  color: #FFFFFF !important;
 }
-.sb-sub {
-  font-size: 0.58rem !important;
-  font-weight: 500 !important;
-  letter-spacing: 0.25em;
-  text-transform: uppercase;
-  color: #7A7060 !important;
-  margin-top: 4px;
-  display: block;
+.sb-logo span {
+  color: #E50914 !important;
 }
-.sb-rule { border: none; border-top: 1px solid #2E2B24; margin: 20px 0; }
-.sb-lbl {
-  font-size: 0.58rem !important;
+.sb-divider {
+  border: none;
+  border-top: 1px solid #222;
+  margin: 20px 0;
+}
+.sb-label {
+  font-size: 0.6rem !important;
   font-weight: 500 !important;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: #7A7060 !important;
+  color: #808080 !important;
   display: block;
   margin-bottom: 8px;
 }
 
 /* sidebar buttons */
 [data-testid="stSidebar"] .stButton > button {
-  font-family: 'Jost', sans-serif !important;
-  font-size: 0.78rem !important;
-  font-weight: 400 !important;
-  letter-spacing: 0.1em !important;
-  border-radius: 0 !important;
+  font-family: 'Inter', sans-serif !important;
+  font-size: 0.8rem !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.08em !important;
+  border-radius: 2px !important;
   text-transform: uppercase !important;
   padding: 10px 0 !important;
+  transition: all 0.15s !important;
 }
 [data-testid="stSidebar"] .stButton > button[kind="primary"] {
-  background: #C4A96A !important;
-  color: #1C1A16 !important;
+  background: #E50914 !important;
+  color: #FFFFFF !important;
   border: none !important;
 }
 [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-  background: #D4B97A !important;
+  background: #F40612 !important;
 }
 [data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {
   background: transparent !important;
-  color: #7A7060 !important;
-  border: 1px solid #2E2B24 !important;
+  color: #808080 !important;
+  border: 1px solid #333 !important;
 }
 [data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {
-  border-color: #7A7060 !important;
-  color: #E8E0D0 !important;
+  color: #E5E5E5 !important;
+  border-color: #555 !important;
 }
 
-/* file uploader inside sidebar */
 [data-testid="stSidebar"] [data-testid="stFileUploader"] {
-  background: #242018 !important;
-  border: 1px dashed #3A3628 !important;
-  border-radius: 0 !important;
+  background: #1A1A1A !important;
+  border: 1px dashed #333 !important;
+  border-radius: 2px !important;
+}
+[data-testid="stSidebar"] [data-testid="stTextInput"] input {
+  background: #1A1A1A !important;
+  border: 1px solid #333 !important;
+  border-radius: 2px !important;
+  color: #E5E5E5 !important;
 }
 
 /* stat cards */
-.sb-stats { display: flex; gap: 6px; margin: 8px 0 16px; }
+.sb-stats { display: flex; gap: 8px; margin: 10px 0 16px; }
 .sb-stat {
   flex: 1;
-  background: #242018;
-  border: 1px solid #2E2B24;
+  background: #1A1A1A;
+  border: 1px solid #222;
   padding: 12px 6px;
   text-align: center;
+  border-radius: 2px;
 }
 .sb-stat-n {
-  font-family: 'Cormorant Garamond', serif !important;
-  font-size: 1.5rem !important;
-  color: #C4A96A !important;
+  font-family: 'Bebas Neue', sans-serif !important;
+  font-size: 1.6rem !important;
+  color: #E50914 !important;
   display: block;
+  letter-spacing: 0.05em;
 }
 .sb-stat-l {
   font-size: 0.55rem !important;
   letter-spacing: 0.15em;
   text-transform: uppercase;
-  color: #7A7060 !important;
+  color: #555 !important;
 }
 .sb-foot {
-  font-family: 'Cormorant Garamond', serif !important;
-  font-style: italic;
-  font-size: 0.8rem !important;
-  color: #3A3628 !important;
+  font-size: 0.7rem !important;
+  color: #444 !important;
   text-align: center;
-  margin-top: 28px;
+  margin-top: 24px;
+  letter-spacing: 0.08em;
 }
 
-/* text input in sidebar */
-[data-testid="stSidebar"] [data-testid="stTextInput"] input {
-  background: #242018 !important;
-  border: 1px solid #3A3628 !important;
-  border-radius: 0 !important;
-  color: #E8E0D0 !important;
-}
-
-/* ═══════════════════════════════════════
-   HERO — origami / folded geometry
-═══════════════════════════════════════ */
-.hero-outer {
+/* ══════════════════════════════
+   HERO
+══════════════════════════════ */
+.hero {
+  background: linear-gradient(
+    to bottom,
+    rgba(0,0,0,0.7) 0%,
+    rgba(20,20,20,0.4) 60%,
+    #141414 100%
+  ),
+  url('https://images.unsplash.com/photo-1486325212027-8081e485255e?w=1600&q=80&fit=crop') center/cover no-repeat;
+  padding: 100px 60px 80px;
   position: relative;
-  background: #F0EBE1;
-  padding: 0;
-  overflow: hidden;
 }
-
-/* large folded triangle top-right */
-.hero-outer::before {
-  content: '';
-  position: absolute;
-  top: 0; right: 0;
-  width: 0; height: 0;
-  border-style: solid;
-  border-width: 0 280px 280px 0;
-  border-color: transparent #C4A96A transparent transparent;
-  z-index: 0;
-}
-/* inner fold shadow */
-.hero-outer::after {
-  content: '';
-  position: absolute;
-  top: 0; right: 0;
-  width: 0; height: 0;
-  border-style: solid;
-  border-width: 0 240px 240px 0;
-  border-color: transparent #D4B97A transparent transparent;
-  z-index: 1;
-}
-
-.hero-content {
-  position: relative;
-  z-index: 2;
-  padding: 64px 60px 48px;
-}
-.hero-eyebrow {
+.hero-tag {
   font-size: 0.62rem;
   font-weight: 500;
-  letter-spacing: 0.28em;
+  letter-spacing: 0.25em;
   text-transform: uppercase;
-  color: #9A8A6A;
+  color: #E50914;
   margin-bottom: 16px;
 }
-.hero-heading {
-  font-family: 'Cormorant Garamond', serif;
-  font-size: 4rem;
-  font-weight: 300;
-  line-height: 1.0;
-  color: #1C1A16;
-  letter-spacing: -0.01em;
+.hero-title {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 5.5rem;
+  line-height: 0.95;
+  letter-spacing: 0.04em;
+  color: #FFFFFF;
+  text-shadow: 0 2px 20px rgba(0,0,0,0.8);
 }
-.hero-heading em {
-  font-style: italic;
-  color: #7A6040;
+.hero-title span { color: #E50914; }
+.hero-sub {
+  font-size: 1rem;
+  font-weight: 300;
+  color: #B3B3B3;
+  margin-top: 16px;
+  letter-spacing: 0.02em;
+  max-width: 480px;
+  line-height: 1.6;
 }
 .hero-rule {
   border: none;
-  border-top: 1px solid #1C1A16;
-  margin: 28px 0 0;
-  width: 100%;
+  border-top: 3px solid #E50914;
+  width: 48px;
+  margin: 24px 0 0;
 }
 
-/* ═══════════════════════════════════════
-   CONTENT GRID — origami fold cards
-═══════════════════════════════════════ */
-.content-area { padding: 0 60px 40px; background: #F0EBE1; }
+/* ══════════════════════════════
+   CONTENT
+══════════════════════════════ */
+.content { padding: 40px 60px 20px; }
 
-.section-tag {
-  font-size: 0.6rem;
+.row-label {
+  font-size: 0.65rem;
   font-weight: 500;
-  letter-spacing: 0.22em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: #9A8A6A;
-  margin: 36px 0 16px;
+  color: #808080;
+  margin-bottom: 16px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
 }
-.section-tag::after {
+.row-label::after {
   content: '';
   flex: 1;
-  border-top: 1px solid #D8D0C0;
+  border-top: 1px solid #222;
 }
 
-/* suggestion grid — origami card style */
-.sug-outer {
+/* suggestion cards — Netflix tile style */
+.tile-row {
   display: grid;
-  grid-template-columns: repeat(3,1fr);
-  gap: 2px;
-  background: #C4A96A;
-  margin-bottom: 8px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 40px;
 }
-.sug-card {
-  background: #F0EBE1;
+.tile {
+  background: #1F1F1F;
   padding: 20px 22px;
-  position: relative;
-  overflow: hidden;
   cursor: pointer;
-  transition: background 0.18s;
-}
-.sug-card::after {
-  content: '';
-  position: absolute;
-  bottom: 0; right: 0;
-  width: 0; height: 0;
-  border-style: solid;
-  border-width: 0 0 20px 20px;
-  border-color: transparent transparent #C4A96A transparent;
+  border-left: 3px solid transparent;
   transition: all 0.18s;
+  position: relative;
 }
-.sug-card:hover { background: #EAE4D8; }
-.sug-card:hover::after { border-width: 0 0 28px 28px; }
-.sug-num {
-  font-family: 'Cormorant Garamond', serif;
-  font-size: 0.75rem;
-  color: #B8A880;
-  margin-bottom: 6px;
-  display: block;
+.tile:hover {
+  background: #2A2A2A;
+  border-left-color: #E50914;
+  transform: scale(1.015);
 }
-.sug-txt {
-  font-family: 'Cormorant Garamond', serif;
-  font-size: 1.05rem;
-  font-weight: 400;
-  color: #2C2618;
-  line-height: 1.3;
+.tile-n {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 1.8rem;
+  color: #333;
+  line-height: 1;
+  margin-bottom: 8px;
+  letter-spacing: 0.05em;
+  transition: color 0.18s;
 }
+.tile:hover .tile-n { color: #E50914; }
+.tile-t {
+  font-size: 0.88rem;
+  font-weight: 300;
+  color: #B3B3B3;
+  line-height: 1.4;
+}
+.tile:hover .tile-t { color: #E5E5E5; }
 
-/* ── MAIN BUTTONS (suggestion) ── */
+/* stButton INSIDE tile — invisible click layer */
 .stButton > button {
-  background: transparent !important;
+  position: absolute !important;
+  inset: 0 !important;
+  opacity: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  cursor: pointer !important;
   border: none !important;
-  padding: 0 !important;
-  width: 100%;
-  height: 100%;
+  background: transparent !important;
 }
 
-/* ═══════════════════════════════════════
+/* ══════════════════════════════
    CHAT
-═══════════════════════════════════════ */
-.chat-area { padding: 0 60px; background: #F0EBE1; }
-
+══════════════════════════════ */
 [data-testid="stChatMessage"] {
   background: transparent !important;
   border: none !important;
-  border-bottom: 1px solid #D8D0C0 !important;
+  border-bottom: 1px solid #1F1F1F !important;
   padding: 28px 0 !important;
   border-radius: 0 !important;
 }
 [data-testid="stChatMessage"] p {
-  font-family: 'Jost', sans-serif !important;
+  font-family: 'Inter', sans-serif !important;
   font-weight: 300 !important;
   font-size: 0.95rem !important;
-  line-height: 1.75 !important;
-  color: #2C2618 !important;
+  line-height: 1.8 !important;
+  color: #E5E5E5 !important;
 }
 [data-testid="stChatMessageAvatarUser"],
 [data-testid="stChatMessageAvatarAssistant"] { display: none !important; }
 
-/* ── CHAT INPUT ── */
 [data-testid="stChatInput"] {
-  background: #E8E2D6;
-  border-top: 1px solid #C4A96A;
-  padding: 14px 60px !important;
+  background: #0A0A0A;
+  border-top: 1px solid #222;
+  padding: 16px 60px !important;
 }
 [data-testid="stChatInput"] textarea {
-  background: #F0EBE1 !important;
-  border: 1px solid #C8C0B0 !important;
-  border-radius: 0 !important;
-  color: #1C1A16 !important;
-  font-family: 'Cormorant Garamond', serif !important;
-  font-size: 1.05rem !important;
-  font-style: italic;
+  background: #1A1A1A !important;
+  border: 1px solid #333 !important;
+  border-radius: 2px !important;
+  color: #E5E5E5 !important;
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 300 !important;
+  font-size: 0.95rem !important;
 }
 [data-testid="stChatInput"] textarea::placeholder {
-  color: #A8A090 !important;
+  color: #555 !important;
 }
 
 /* source pills */
 .pill {
   display: inline-block;
-  border-left: 2px solid #C4A96A;
-  padding: 1px 8px;
-  font-family: 'Jost', sans-serif;
+  background: #1F1F1F;
+  border-left: 2px solid #E50914;
+  padding: 2px 10px;
   font-size: 0.68rem;
   font-weight: 400;
-  letter-spacing: 0.06em;
-  color: #7A6A50;
+  letter-spacing: 0.04em;
+  color: #808080;
   margin: 4px 6px 0 0;
-  background: #EAE4D8;
+}
+
+/* error / rate limit box */
+.rate-box {
+  background: #1A0A0A;
+  border: 1px solid #E50914;
+  border-radius: 2px;
+  padding: 16px 20px;
+  font-size: 0.88rem;
+  color: #E5E5E5;
+  margin-top: 8px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -357,12 +342,13 @@ CHUNK_SIZE   = 400; OVERLAP = 80; TOP_K = 8
 GEMINI_MODEL = "gemini-2.0-flash"
 CHART_KW     = ["chart","plot","graph","visuali","bar","pie","line",
                  "scatter","histogram","show","compare","distribution","trend"]
+MAX_RETRIES  = 3   # retry on rate limit
 
 for k,v in {"chunks":[],"index":None,"embeddings":None,
              "history":[],"dataframes":{},"ready":False,"embed_model":None}.items():
     if k not in st.session_state: st.session_state[k] = v
 
-@st.cache_resource(show_spinner="Loading intelligence layer…")
+@st.cache_resource(show_spinner="Loading model…")
 def load_embed(): return SentenceTransformer(EMBED_MODEL)
 
 # ── parsers ──────────────────────────────────────────────────
@@ -424,7 +410,8 @@ def retrieve(q,model,idx,emb,chunks):
     scores,ids=idx.search(qe,TOP_K)
     return [{**chunks[i],"score":float(s)} for s,i in zip(scores[0],ids[0]) if i>=0]
 
-def ask(question,ctx,history):
+def ask(question, ctx, history):
+    """Calls Gemini with exponential back-off on rate-limit errors."""
     context="\n\n---\n\n".join(
         f"[SOURCE {i+1}: {c['source']}"+(f" | {', '.join(f'{k}:{v}' for k,v in c['meta'].items())}" if c['meta'] else "")+f"]\n{c['text']}"
         for i,c in enumerate(ctx))
@@ -442,7 +429,23 @@ def ask(question,ctx,history):
         SOURCES: {context}
         QUESTION: {question}
         ANSWER:""").strip()
-    return genai.GenerativeModel(GEMINI_MODEL).generate_content(prompt).text
+
+    model_obj = genai.GenerativeModel(GEMINI_MODEL)
+    for attempt in range(MAX_RETRIES):
+        try:
+            return model_obj.generate_content(prompt).text
+        except ResourceExhausted:
+            if attempt < MAX_RETRIES - 1:
+                wait = 15 * (attempt + 1)   # 15s, 30s, 45s
+                time.sleep(wait)
+            else:
+                return (
+                    "**Rate limit reached.** Gemini's free tier allows 15 requests/minute. "
+                    "Please wait 30–60 seconds and try again. "
+                    "For higher limits, add billing at [console.cloud.google.com](https://console.cloud.google.com)."
+                )
+        except Exception as e:
+            return f"**Error:** {str(e)[:200]}"
 
 def wants_chart(q): return any(k in q.lower() for k in CHART_KW)
 
@@ -453,11 +456,13 @@ def get_spec(answer):
         except: pass
     return None
 
-CLAYOUT=dict(paper_bgcolor="#F0EBE1",plot_bgcolor="#EAE4D8",
-    font=dict(family="Jost,sans-serif",color="#2C2618",size=12),
-    title_font=dict(family="Cormorant Garamond,serif",size=18,color="#1C1A16"),
-    colorway=["#C4A96A","#1C1A16","#7A6040","#D4B97A","#4A4030","#E8D4A0"],
-    margin=dict(t=48,b=32,l=32,r=32))
+CLAYOUT=dict(
+    paper_bgcolor="#141414", plot_bgcolor="#1F1F1F",
+    font=dict(family="Inter,sans-serif",color="#B3B3B3",size=12),
+    title_font=dict(family="Bebas Neue,sans-serif",size=22,color="#FFFFFF",letterSpacing=2),
+    colorway=["#E50914","#B3B3B3","#E5E5E5","#831010","#666666","#FF4444"],
+    margin=dict(t=52,b=32,l=32,r=32),
+)
 
 def render_chart(question,answer):
     dfs=st.session_state["dataframes"]
@@ -487,24 +492,24 @@ def render_chart(question,answer):
 # ════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("""
-    <div class='sb-brand'>AllDoors</div>
-    <span class='sb-sub'>Intelligence</span>
-    <hr class='sb-rule'>
+    <div class='sb-logo'>All<span>Doors</span></div>
+    <hr class='sb-divider'>
     """, unsafe_allow_html=True)
 
-    # API key — silent, never displayed
+    # API key — silent from secrets, never shown
     _key=""
     try: _key=st.secrets.get("GEMINI_API_KEY","")
     except: pass
     if not _key:
-        st.markdown("<span class='sb-lbl'>API Key</span>", unsafe_allow_html=True)
+        st.markdown("<span class='sb-label'>API Key</span>",unsafe_allow_html=True)
         _key=st.text_input("k",type="password",placeholder="Gemini key…",label_visibility="collapsed")
         st.caption("Free at [aistudio.google.com](https://aistudio.google.com)")
     if _key:
         genai.configure(api_key=_key)
         st.session_state["ready"]=True
 
-    st.markdown("<hr class='sb-rule'><span class='sb-lbl'>Documents</span>", unsafe_allow_html=True)
+    st.markdown("<hr class='sb-divider'><span class='sb-label'>Documents</span>",unsafe_allow_html=True)
+    st.caption("CSV · Excel · PDF · Word · JSON")
 
     files=st.file_uploader("f",label_visibility="collapsed",
         type=["csv","xlsx","xls","pdf","docx","json","tsv","md","txt"],
@@ -540,61 +545,58 @@ with st.sidebar:
                 st.session_state[k]=[] if k in ("chunks","history") else ({} if k=="dataframes" else None)
             st.rerun()
 
-    st.markdown("<div class='sb-foot'>alldoors.in</div>",unsafe_allow_html=True)
+    st.markdown("<div class='sb-foot'>alldoors.in &nbsp;·&nbsp; Team C</div>",unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
-# MAIN
+# HERO
 # ════════════════════════════════════════════════════════════
-
-# Hero with origami fold
 st.markdown("""
-<div class='hero-outer'>
-  <div class='hero-content'>
-    <div class='hero-eyebrow'>AllDoors &nbsp;·&nbsp; Real Estate Intelligence &nbsp;·&nbsp; Team C</div>
-    <div class='hero-heading'>We are<br><em>Team C.</em></div>
-    <hr class='hero-rule'>
+<div class='hero'>
+  <div class='hero-tag'>AllDoors &nbsp;·&nbsp; Real Estate Intelligence</div>
+  <div class='hero-title'>We Are<br><span>Team C.</span></div>
+  <div class='hero-sub'>
+    Ask questions about your CRM data. Get cited answers and live charts — instantly.
   </div>
+  <hr class='hero-rule'>
 </div>
 """, unsafe_allow_html=True)
 
-# Suggestions
+# ════════════════════════════════════════════════════════════
+# SUGGESTIONS
+# ════════════════════════════════════════════════════════════
+SUGGESTIONS=[
+    "What was the total closed-won revenue?",
+    "Who is the top rep by pipeline value?",
+    "Show a bar chart of deals by stage",
+    "List the at-risk accounts",
+    "Does the PDF contract total match the deals sheet?",
+    "Which lead sources convert best?",
+]
+
 if not st.session_state["history"]:
-    st.markdown("""
-    <div class='content-area'>
-      <div class='section-tag'>Suggested Queries</div>
-    </div>""", unsafe_allow_html=True)
-
-    SUGGESTIONS=[
-        "What was the total closed-won revenue?",
-        "Who is the top rep by pipeline value?",
-        "Show a bar chart of deals by stage",
-        "List the at-risk accounts",
-        "Does the PDF contract total match the deals sheet?",
-        "Which lead sources convert best?",
-    ]
-
-    # Render as native buttons styled via CSS
+    st.markdown("<div class='content'><div class='row-label'>Suggested Queries</div>", unsafe_allow_html=True)
     cols=st.columns(3,gap="small")
     for i,s in enumerate(SUGGESTIONS):
         with cols[i%3]:
-            # wrap each button in a styled card div
             st.markdown(f"""
-            <div class='sug-card'>
-              <span class='sug-num'>0{i+1}</span>
-              <span class='sug-txt'>{s}</span>
+            <div class='tile' style='position:relative'>
+              <div class='tile-n'>0{i+1}</div>
+              <div class='tile-t'>{s}</div>
             </div>""", unsafe_allow_html=True)
-            if st.button(s, key=f"s{i}", use_container_width=True):
+            if st.button(s,key=f"s{i}",use_container_width=True):
                 st.session_state["_q"]=s; st.rerun()
 
     st.markdown("""
-    <div class='content-area'>
-      <p style='font-family:Cormorant Garamond,serif;font-style:italic;
-      color:#9A8A6A;font-size:0.95rem;text-align:center;margin-top:32px;margin-bottom:24px'>
-      Upload your documents in the sidebar, index them, and begin your enquiry.
-      </p>
-    </div>""", unsafe_allow_html=True)
+    <p style='font-family:Inter,sans-serif;font-weight:300;color:#555;
+    font-size:0.82rem;text-align:center;margin-top:36px;letter-spacing:0.04em'>
+    Upload your documents in the sidebar — index them — then begin your enquiry below.
+    </p></div>""", unsafe_allow_html=True)
 
-# Chat history
+# ════════════════════════════════════════════════════════════
+# CHAT
+# ════════════════════════════════════════════════════════════
+st.markdown("<div class='content'>",unsafe_allow_html=True)
+
 for turn in st.session_state["history"]:
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
@@ -603,8 +605,9 @@ for turn in st.session_state["history"]:
         if turn.get("fig"):
             st.plotly_chart(turn["fig"],use_container_width=True)
 
-# Input
-question=st.chat_input("Enter your enquiry…") or st.session_state.pop("_q",None)
+st.markdown("</div>",unsafe_allow_html=True)
+
+question=st.chat_input("Ask about your data…") or st.session_state.pop("_q",None)
 
 if question:
     if not st.session_state["ready"]:
@@ -618,7 +621,7 @@ if question:
     st.session_state["history"].append({"role":"user","content":question})
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching documents…"):
+        with st.spinner("Searching…"):
             ctx=retrieve(question,st.session_state["embed_model"],
                          st.session_state["index"],st.session_state["embeddings"],
                          st.session_state["chunks"])
