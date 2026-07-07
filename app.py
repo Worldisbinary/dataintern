@@ -397,14 +397,18 @@ with st.sidebar:
     # Auto-load from Streamlit Cloud secrets if available
     _secret_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
 
-    # API key input
-    api_key = st.text_input(
-        "Gemini API Key",
-        type="password",
-        value=_secret_key,
-        placeholder="Paste your key here…",
-        help="Get it free at aistudio.google.com → Get API Key",
-    )
+    if _secret_key:
+        # Key loaded from secrets — don't show input box at all
+        api_key = _secret_key
+        st.success("✅ API key loaded from secrets")
+    else:
+        # No secret set — show the input box (for local runs)
+        api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            placeholder="Paste your key here…",
+            help="Get it free at aistudio.google.com → Get API Key",
+        )
     if api_key:
         try:
             genai.configure(api_key=api_key)
