@@ -18,7 +18,7 @@ import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 
 st.set_page_config(
-    page_title="AllDoors Intelligence",
+    page_title="alldoors Intelligence",
     page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
