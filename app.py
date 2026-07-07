@@ -46,7 +46,6 @@ st.markdown("""
 # ── constants ─────────────────────────────────────────────────
 EMBED_MODEL  = "all-MiniLM-L6-v2"
 CHUNK_SIZE   = 400; OVERLAP = 80; TOP_K = 8
-GEMINI_MODEL = "gemini-2.0-flash"
 CHART_KW     = ["chart","plot","graph","bar","pie","line","scatter",
                  "histogram","show","compare","distribution","trend","visuali"]
 MAX_RETRIES  = 3
@@ -208,18 +207,17 @@ with st.sidebar:
     st.markdown("**INTELLIGENCE**")
     st.divider()
 
-    # API key silent from secrets
+    # API key silent from secrets — reads RAPIDAPI_KEY, never shown
     _key=""
-    try: _key=st.secrets.get("GEMINI_API_KEY","")
+    try: _key=st.secrets.get("RAPIDAPI_KEY","")
     except: pass
     if not _key:
         st.markdown("**API KEY**")
         _key=st.text_input("key",type="password",
-                           placeholder="Paste Gemini key…",
+                           placeholder="Paste RapidAPI key…",
                            label_visibility="collapsed")
-        st.caption("Free → [aistudio.google.com](https://aistudio.google.com)")
+        st.caption("Get key → [rapidapi.com](https://rapidapi.com)")
     if _key:
-        pass  # key stored in secrets
         st.session_state["ready"]=True
 
     st.divider()
