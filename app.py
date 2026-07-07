@@ -27,6 +27,16 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* force sidebar always open */
+[data-testid="stSidebar"] {
+  min-width: 260px !important;
+  max-width: 260px !important;
+}
+[data-testid="collapsedControl"] {
+  display: none !important;
+}
+
+@import url('https://fonts...
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
