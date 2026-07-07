@@ -1,27 +1,9 @@
 """
-============================================================
 DataIntern — RAG Chatbot for CRM & Business Data
-============================================================
-Stack:
-  - Streamlit          : UI + file upload
-  - Google Gemini API  : LLM (gemini-1.5-flash, free tier)
-  - sentence-transformers: local free embeddings (all-MiniLM-L6-v2)
-  - FAISS              : in-memory vector index
-  - Plotly             : inline charts
-  - pdfplumber         : PDF parsing
-  - python-docx        : Word doc parsing
-  - openpyxl / pandas  : Excel + CSV parsing
-
-Flow per query:
-  1. Embed the question
-  2. FAISS top-k retrieval from the chunk index
-  3. Build a grounded prompt (context + citations)
-  4. Gemini generates a cited answer
-  5. If chart is detected → Plotly renders inline
-============================================================
+Stack: Streamlit · Gemini 2.0 Flash · sentence-transformers · FAISS · Plotly
 """
 
-import os, json, re, io, textwrap
+import json, re, textwrap
 from pathlib import Path
 
 import streamlit as st
@@ -35,528 +17,404 @@ import docx
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
+# ── page config ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="DataIntern — CRM Chatbot",
-    page_icon="📊",
+    page_title="DataIntern",
+    page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── minimal custom CSS (clean, dark-accent header) ──────────
+# ── CSS ─────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  .block-container { padding-top: 1.5rem; }
-  h1 { font-size: 1.6rem !important; }
-  .source-pill {
-    display: inline-block; background: #f0f2f6;
-    border-radius: 4px; padding: 2px 8px;
-    font-size: 0.75rem; color: #444; margin: 2px;
+  /* hide default Streamlit header & footer */
+  #MainMenu, footer, header { visibility: hidden; }
+
+  /* overall background */
+  .stApp { background: #0f1117; }
+
+  /* sidebar */
+  [data-testid="stSidebar"] {
+    background: #16181f;
+    border-right: 1px solid #2a2d3a;
   }
-  .stChatMessage { border-radius: 8px; }
+
+  /* chat input */
+  [data-testid="stChatInput"] textarea {
+    background: #1e2130 !important;
+    border: 1px solid #3a3d4a !important;
+    color: #e0e0e0 !important;
+    border-radius: 12px !important;
+  }
+
+  /* suggestion buttons */
+  .sug-btn button {
+    background: #1e2130 !important;
+    border: 1px solid #3a3d4a !important;
+    color: #c0c4d6 !important;
+    border-radius: 10px !important;
+    text-align: left !important;
+    font-size: 0.82rem !important;
+    padding: 10px 14px !important;
+    transition: border-color 0.2s;
+  }
+  .sug-btn button:hover {
+    border-color: #6c8cff !important;
+    color: #fff !important;
+  }
+
+  /* source pills */
+  .pill {
+    display: inline-block;
+    background: #1e2130;
+    border: 1px solid #3a3d4a;
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 0.72rem;
+    color: #8892b0;
+    margin: 2px 3px 0 0;
+  }
+
+  /* ingest success */
+  .ingest-ok {
+    background: #0d2b1f;
+    border: 1px solid #1a4a30;
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: #4ade80;
+    font-size: 0.82rem;
+    margin-top: 8px;
+  }
+
+  /* stat cards in sidebar */
+  .stat { text-align: center; padding: 8px 0; }
+  .stat b { display: block; font-size: 1.4rem; color: #6c8cff; }
+  .stat span { font-size: 0.7rem; color: #8892b0; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  h1 { font-size: 1.55rem !important; color: #e0e0e0 !important; }
+  p, li { color: #a0a4b8; }
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# CONSTANTS
-# ============================================================
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"   # free, runs locally, 384-dim
-CHUNK_SIZE       = 400                    # characters per chunk
-CHUNK_OVERLAP    = 80
-TOP_K            = 8                      # chunks retrieved per query
-GEMINI_MODEL     = "gemini-2.0-flash"    # free-tier model
+# ── constants ────────────────────────────────────────────────
+EMBED_MODEL  = "all-MiniLM-L6-v2"
+CHUNK_SIZE   = 400
+OVERLAP      = 80
+TOP_K        = 8
+GEMINI_MODEL = "gemini-2.0-flash"
+CHART_KW     = ["chart","plot","graph","visuali","bar","pie","line",
+                 "scatter","histogram","show me","compare","distribution","trend"]
 
-# Chart-request keywords — if any appear, we try to plot
-CHART_KEYWORDS = [
-    "chart", "plot", "graph", "visuali", "bar", "pie",
-    "line", "scatter", "histogram", "show me", "compare",
-    "distribution", "trend",
-]
+# ── session state ────────────────────────────────────────────
+for k, v in {
+    "chunks": [], "index": None, "embeddings": None,
+    "history": [], "dataframes": {}, "ready": False, "embed_model": None,
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ============================================================
-# SESSION STATE INITIALISATION
-# ============================================================
-def _init_state():
-    defaults = {
-        "chunks":       [],   # list of {"text", "source", "meta"}
-        "index":        None, # FAISS index
-        "embeddings":   None, # np array of chunk embeddings
-        "chat_history": [],   # list of {"role", "content", "sources"}
-        "dataframes":   {},   # filename → pd.DataFrame (for charting)
-        "gemini_ready": False,
-        "embed_model":  None,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-_init_state()
-
-# ============================================================
-# EMBEDDING MODEL (cached so it loads only once per session)
-# ============================================================
+# ── embedding model ──────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading embedding model…")
-def load_embed_model():
-    return SentenceTransformer(EMBED_MODEL_NAME)
+def load_embed():
+    return SentenceTransformer(EMBED_MODEL)
 
-# ============================================================
-# FILE PARSERS — each returns list of {"text", "source", "meta"}
-# ============================================================
+# ── parsers ──────────────────────────────────────────────────
+def chunk(text, src, meta):
+    out, s = [], 0
+    while s < len(text):
+        c = text[s:s+CHUNK_SIZE].strip()
+        if c:
+            out.append({"text": c, "source": src, "meta": meta.copy()})
+        s += CHUNK_SIZE - OVERLAP
+    return out
 
-def _chunk_text(text: str, source: str, meta: dict) -> list[dict]:
-    """Splits a long string into overlapping chunks."""
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + CHUNK_SIZE
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append({"text": chunk, "source": source, "meta": meta.copy()})
-        start += CHUNK_SIZE - CHUNK_OVERLAP
-    return chunks
-
-
-def parse_csv(file, filename: str) -> list[dict]:
-    """CSV → row-by-row text chunks + stores DataFrame for charting."""
-    df = pd.read_csv(file)
-    st.session_state["dataframes"][filename] = df
-    chunks = []
-    # Header description chunk
-    header_text = f"File: {filename}\nColumns: {', '.join(df.columns)}\nRow count: {len(df)}"
-    chunks.append({"text": header_text, "source": filename, "meta": {"type": "header"}})
-    # Every 10 rows → one chunk
+def parse_csv(f, name):
+    df = pd.read_csv(f)
+    st.session_state["dataframes"][name] = df
+    rows = [{"text": f"File:{name}\nCols:{','.join(df.columns)}\nRows:{len(df)}", "source": name, "meta": {"type":"header"}}]
     for i in range(0, len(df), 10):
-        batch = df.iloc[i : i + 10]
-        text = f"[{filename} rows {i+1}–{i+len(batch)}]\n" + batch.to_string(index=False)
-        chunks.append({"text": text, "source": filename, "meta": {"rows": f"{i+1}-{i+len(batch)}"}})
-    return chunks
+        b = df.iloc[i:i+10]
+        rows.append({"text": f"[{name} rows {i+1}-{i+len(b)}]\n{b.to_string(index=False)}", "source": name, "meta": {"rows": f"{i+1}-{i+len(b)}"}})
+    return rows
 
-
-def parse_excel(file, filename: str) -> list[dict]:
-    """Excel → parse every sheet; store each as a DataFrame."""
-    xl = pd.ExcelFile(file)
-    chunks = []
-    for sheet in xl.sheet_names:
-        df = xl.parse(sheet)
-        key = f"{filename} › {sheet}"
+def parse_excel(f, name):
+    xl, out = pd.ExcelFile(f), []
+    for sh in xl.sheet_names:
+        df = xl.parse(sh)
+        key = f"{name} › {sh}"
         st.session_state["dataframes"][key] = df
-        chunks.append({
-            "text": f"File: {filename}, Sheet: {sheet}\nColumns: {', '.join(str(c) for c in df.columns)}\nRows: {len(df)}",
-            "source": key, "meta": {"type": "header"},
-        })
+        out.append({"text": f"File:{name} Sheet:{sh}\nCols:{','.join(str(c) for c in df.columns)}\nRows:{len(df)}", "source": key, "meta": {"type":"header"}})
         for i in range(0, len(df), 10):
-            batch = df.iloc[i : i + 10]
-            text = f"[{key} rows {i+1}–{i+len(batch)}]\n" + batch.to_string(index=False)
-            chunks.append({"text": text, "source": key, "meta": {"rows": f"{i+1}-{i+len(batch)}"}})
-    return chunks
+            b = df.iloc[i:i+10]
+            out.append({"text": f"[{key} rows {i+1}-{i+len(b)}]\n{b.to_string(index=False)}", "source": key, "meta": {"rows": f"{i+1}-{i+len(b)}"}})
+    return out
 
+def parse_pdf(f, name):
+    out = []
+    with pdfplumber.open(f) as pdf:
+        for i, pg in enumerate(pdf.pages):
+            t = pg.extract_text() or ""
+            if t.strip():
+                out.extend(chunk(t, name, {"page": i+1}))
+    return out
 
-def parse_pdf(file, filename: str) -> list[dict]:
-    """PDF → page-by-page text chunks using pdfplumber."""
-    chunks = []
-    with pdfplumber.open(file) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                for c in _chunk_text(text, filename, {"page": i + 1}):
-                    chunks.append(c)
-    return chunks
+def parse_docx(f, name):
+    d = docx.Document(f)
+    return chunk("\n".join(p.text for p in d.paragraphs if p.text.strip()), name, {"type":"doc"})
 
+def parse_json(f, name):
+    return chunk(json.dumps(json.load(f), indent=2), name, {"type":"json"})
 
-def parse_docx(file, filename: str) -> list[dict]:
-    """Word doc → paragraph text chunks."""
-    doc = docx.Document(file)
-    full_text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-    return _chunk_text(full_text, filename, {"type": "paragraph"})
+def parse_text(f, name):
+    return chunk(f.read().decode("utf-8", errors="ignore"), name, {"type":"text"})
 
+PARSERS = {".csv": parse_csv, ".xlsx": parse_excel, ".xls": parse_excel,
+           ".pdf": parse_pdf, ".docx": parse_docx, ".json": parse_json,
+           ".tsv": lambda f, n: parse_csv(f, n),
+           ".md": parse_text, ".txt": parse_text}
 
-def parse_json(file, filename: str) -> list[dict]:
-    """JSON → pretty-printed chunks."""
-    data = json.load(file)
-    text = json.dumps(data, indent=2)
-    return _chunk_text(text, filename, {"type": "json"})
+# ── index ────────────────────────────────────────────────────
+def build_index(chunks, model):
+    emb = model.encode([c["text"] for c in chunks], show_progress_bar=False, batch_size=64).astype(np.float32)
+    faiss.normalize_L2(emb)
+    idx = faiss.IndexFlatIP(emb.shape[1])
+    idx.add(emb)
+    return idx, emb
 
+def retrieve(q, model, idx, emb, chunks):
+    qe = model.encode([q]).astype(np.float32)
+    faiss.normalize_L2(qe)
+    scores, ids = idx.search(qe, TOP_K)
+    return [{**chunks[i], "score": float(s)} for s, i in zip(scores[0], ids[0]) if i >= 0]
 
-def parse_tsv(file, filename: str) -> list[dict]:
-    """TSV treated the same as CSV."""
-    df = pd.read_csv(file, sep="\t")
-    st.session_state["dataframes"][filename] = df
-    chunks = []
-    chunks.append({
-        "text": f"File: {filename}\nColumns: {', '.join(df.columns)}\nRow count: {len(df)}",
-        "source": filename, "meta": {"type": "header"},
-    })
-    for i in range(0, len(df), 10):
-        batch = df.iloc[i : i + 10]
-        text = f"[{filename} rows {i+1}–{i+len(batch)}]\n" + batch.to_string(index=False)
-        chunks.append({"text": text, "source": filename, "meta": {"rows": f"{i+1}-{i+len(batch)}"}})
-    return chunks
-
-
-def parse_md(file, filename: str) -> list[dict]:
-    """Markdown / plain text → text chunks."""
-    text = file.read().decode("utf-8", errors="ignore")
-    return _chunk_text(text, filename, {"type": "markdown"})
-
-
-PARSERS = {
-    ".csv":  parse_csv,
-    ".xlsx": parse_excel,
-    ".xls":  parse_excel,
-    ".pdf":  parse_pdf,
-    ".docx": parse_docx,
-    ".json": parse_json,
-    ".tsv":  parse_tsv,
-    ".md":   parse_md,
-    ".txt":  parse_md,
-}
-
-# ============================================================
-# INDEX BUILDER
-# ============================================================
-
-def build_index(chunks: list[dict], model) -> faiss.IndexFlatIP:
-    """Embeds all chunks and stores them in a FAISS inner-product index."""
-    texts = [c["text"] for c in chunks]
-    # Batch embed (sentence-transformers handles batching internally)
-    embeddings = model.encode(texts, show_progress_bar=False, batch_size=64)
-    embeddings = embeddings.astype(np.float32)
-    # Normalise → inner product == cosine similarity
-    faiss.normalize_L2(embeddings)
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)
-    return index, embeddings
-
-
-def retrieve(query: str, model, index, embeddings, chunks, k=TOP_K) -> list[dict]:
-    """Returns the top-k most relevant chunks for a query."""
-    q_emb = model.encode([query]).astype(np.float32)
-    faiss.normalize_L2(q_emb)
-    scores, idxs = index.search(q_emb, k)
-    results = []
-    for score, idx in zip(scores[0], idxs[0]):
-        if idx >= 0:
-            results.append({**chunks[idx], "score": float(score)})
-    return results
-
-# ============================================================
-# GEMINI ANSWER GENERATION
-# ============================================================
-
-def ask_gemini(question: str, context_chunks: list[dict], history: list[dict]) -> str:
-    """
-    Builds a grounded prompt from retrieved chunks and chat history,
-    calls Gemini, and returns the answer string.
-    """
-    # Build context block with source labels
-    context_parts = []
-    for i, c in enumerate(context_chunks):
-        meta_str = ", ".join(f"{k}: {v}" for k, v in c["meta"].items()) if c["meta"] else ""
-        label = f"[SOURCE {i+1}: {c['source']}" + (f" | {meta_str}" if meta_str else "") + "]"
-        context_parts.append(f"{label}\n{c['text']}")
-    context_block = "\n\n---\n\n".join(context_parts)
-
-    # Build chat history string (last 6 turns for context window efficiency)
-    history_str = ""
-    for turn in history[-6:]:
-        role = "User" if turn["role"] == "user" else "Assistant"
-        history_str += f"{role}: {turn['content']}\n"
-
-    system_prompt = textwrap.dedent(f"""
+# ── Gemini ───────────────────────────────────────────────────
+def ask(question, ctx, history):
+    context = "\n\n---\n\n".join(
+        f"[SOURCE {i+1}: {c['source']}" +
+        (f" | {', '.join(f'{k}:{v}' for k,v in c['meta'].items())}" if c['meta'] else "") +
+        f"]\n{c['text']}"
+        for i, c in enumerate(ctx)
+    )
+    hist = "".join(
+        f"{'User' if t['role']=='user' else 'Assistant'}: {t['content']}\n"
+        for t in history[-6:]
+    )
+    prompt = textwrap.dedent(f"""
         You are DataIntern, a precise business data analyst.
-        Answer ONLY from the provided source documents.
-        If the answer is not in the sources, say exactly:
+        Answer ONLY from the provided sources. If the answer isn't there, say:
         "I don't see that information in the uploaded files."
+        Cite every fact with [SOURCE N]. For charts include:
+        ```chart
+        {{"type":"bar","x":"column","y":"column","source":"filename"}}
+        ```
 
-        Rules:
-        - Cite every fact with [SOURCE N] where N matches the context block.
-        - For numbers, quote them exactly as they appear in the source.
-        - Be concise but complete.
-        - If asked to chart/visualise, describe what to chart and include
-          a JSON block like: ```chart\n{{"type":"bar","x":"column","y":"column","source":"filename"}}\n```
-    """).strip()
+        HISTORY:
+        {hist}
 
-    full_prompt = f"""{system_prompt}
+        SOURCES:
+        {context}
 
---- CONVERSATION HISTORY ---
-{history_str}
+        QUESTION: {question}
+        ANSWER:""").strip()
 
---- RETRIEVED CONTEXT ---
-{context_block}
+    return genai.GenerativeModel(GEMINI_MODEL).generate_content(prompt).text
 
---- QUESTION ---
-{question}
+# ── chart ────────────────────────────────────────────────────
+def wants_chart(q):
+    return any(k in q.lower() for k in CHART_KW)
 
---- ANSWER ---"""
-
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    response = model.generate_content(full_prompt)
-    return response.text
-
-# ============================================================
-# CHART DETECTION & RENDERING
-# ============================================================
-
-def _wants_chart(question: str) -> bool:
-    q = question.lower()
-    return any(kw in q for kw in CHART_KEYWORDS)
-
-
-def _extract_chart_spec(answer: str) -> dict | None:
-    """Pulls the ```chart ... ``` JSON block from the LLM answer if present."""
-    match = re.search(r"```chart\s*(\{.*?\})\s*```", answer, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except Exception:
-            return None
+def get_chart_spec(answer):
+    m = re.search(r"```chart\s*(\{.*?\})\s*```", answer, re.DOTALL)
+    if m:
+        try: return json.loads(m.group(1))
+        except: pass
     return None
 
-
-def render_chart(question: str, answer: str) -> go.Figure | None:
-    """
-    Tries to render a chart.
-    Priority: (1) LLM-specified chart spec, (2) heuristic from question keywords.
-    Returns a Plotly figure or None.
-    """
+def render_chart(question, answer):
     dfs = st.session_state["dataframes"]
-    if not dfs:
-        return None
-
-    spec = _extract_chart_spec(answer)
-
-    # If LLM gave us a spec, use it
-    if spec:
-        src = spec.get("source", "")
-        # Find the best matching DataFrame
-        df = None
-        for key in dfs:
-            if src.lower() in key.lower() or key.lower() in src.lower():
-                df = dfs[key]
-                break
-        if df is None:
-            df = list(dfs.values())[0]  # fall back to first
-
-        x_col = spec.get("x")
-        y_col = spec.get("y")
-        chart_type = spec.get("type", "bar")
-
-        # Validate columns exist
-        if x_col in df.columns and y_col in df.columns:
-            if chart_type == "bar":
-                return px.bar(df, x=x_col, y=y_col, title=f"{y_col} by {x_col}")
-            elif chart_type == "line":
-                return px.line(df, x=x_col, y=y_col, title=f"{y_col} over {x_col}")
-            elif chart_type == "pie":
-                return px.pie(df, names=x_col, values=y_col, title=f"{y_col} by {x_col}")
-            elif chart_type == "scatter":
-                return px.scatter(df, x=x_col, y=y_col, title=f"{x_col} vs {y_col}")
-
-    # Heuristic fallback: pick the largest numeric DataFrame and guess columns
+    if not dfs: return None
+    spec = get_chart_spec(answer)
     q = question.lower()
-    best_df = max(dfs.items(), key=lambda kv: len(kv[1]), default=(None, None))
-    if best_df[1] is None:
+
+    if spec:
+        df = next((dfs[k] for k in dfs if spec.get("source","").lower() in k.lower()), list(dfs.values())[0])
+        x, y, t = spec.get("x"), spec.get("y"), spec.get("type","bar")
+        if x in df.columns and y in df.columns:
+            fns = {"bar": px.bar, "line": px.line, "pie": px.pie, "scatter": px.scatter}
+            fn = fns.get(t, px.bar)
+            kw = {"names": x, "values": y} if t == "pie" else {"x": x, "y": y}
+            return fn(df, title=f"{y} by {x}", **kw)
+
+    # heuristic fallback
+    label, df = max(dfs.items(), key=lambda kv: len(kv[1]))
+    num = df.select_dtypes(include="number").columns.tolist()
+    cat = df.select_dtypes(exclude="number").columns.tolist()
+    if not num: return None
+    y_col = num[0]; x_col = cat[0] if cat else df.columns[0]
+    try:
+        agg = df.groupby(x_col)[y_col].sum().reset_index().sort_values(y_col, ascending=False).head(20)
+        return px.bar(agg, x=x_col, y=y_col, title=f"{y_col} by {x_col} (from {label})")
+    except:
         return None
-    label, df = best_df
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
 
-    if not num_cols:
-        return None
-
-    y_col = num_cols[0]
-    # Try to pick a sensible x column
-    x_col = cat_cols[0] if cat_cols else df.columns[0]
-
-    title = f"{y_col} by {x_col} (from {label})"
-
-    if "pie" in q:
-        return px.pie(df.head(15), names=x_col, values=y_col, title=title)
-    elif "line" in q or "trend" in q:
-        return px.line(df, x=x_col, y=y_col, title=title)
-    elif "scatter" in q:
-        if len(num_cols) >= 2:
-            return px.scatter(df, x=num_cols[0], y=num_cols[1], title=f"{num_cols[0]} vs {num_cols[1]}")
-    else:
-        # Default: bar chart, aggregate if needed
-        try:
-            agg = df.groupby(x_col)[y_col].sum().reset_index().sort_values(y_col, ascending=False).head(20)
-            return px.bar(agg, x=x_col, y=y_col, title=title)
-        except Exception:
-            return px.bar(df.head(20), x=x_col, y=y_col, title=title)
-
-# ============================================================
-# SIDEBAR — API key + file upload
-# ============================================================
-
+# ════════════════════════════════════════════════════════════
+# SIDEBAR
+# ════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.title("⚙️ DataIntern Setup")
+    # Brand
+    st.markdown("## 🔍 DataIntern")
+    st.markdown("<p style='color:#8892b0;font-size:0.8rem;margin-top:-10px'>RAG Chatbot · CRM & Business Data</p>", unsafe_allow_html=True)
+    st.divider()
 
-    # Auto-load from Streamlit Cloud secrets if available
-    _secret_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
+    # ── silent API key load (no banner) ──────────────────────
+    _key = ""
+    try:
+        _key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        pass
 
-    if _secret_key:
-        # Key loaded from secrets — don't show input box at all
-        api_key = _secret_key
-        st.success("✅ API key loaded from secrets")
-    else:
-        # No secret set — show the input box (for local runs)
-        api_key = st.text_input(
-            "Gemini API Key",
-            type="password",
-            placeholder="Paste your key here…",
-            help="Get it free at aistudio.google.com → Get API Key",
-        )
-    if api_key:
-        try:
-            genai.configure(api_key=api_key)
-            st.session_state["gemini_ready"] = True
-        except Exception as e:
-            st.error(f"❌ Could not configure API: {e}")
-            st.session_state["gemini_ready"] = False
+    if not _key:
+        _key = st.text_input("Gemini API Key", type="password",
+                             placeholder="Paste key from aistudio.google.com",
+                             label_visibility="collapsed")
+        st.caption("🔑 [Get a free key →](https://aistudio.google.com)")
+
+    if _key:
+        genai.configure(api_key=_key)
+        st.session_state["ready"] = True
 
     st.divider()
 
-    # File uploader
-    uploaded_files = st.file_uploader(
-        "Upload your files",
-        type=["csv", "xlsx", "xls", "pdf", "docx", "json", "tsv", "md", "txt"],
+    # ── file upload ───────────────────────────────────────────
+    st.markdown("**📁 Upload Files**")
+    st.caption("CSV · Excel · PDF · Word · JSON · TSV · Markdown")
+
+    files = st.file_uploader(
+        "files", label_visibility="collapsed",
+        type=["csv","xlsx","xls","pdf","docx","json","tsv","md","txt"],
         accept_multiple_files=True,
-        help="Supported: CSV, Excel, PDF, Word, JSON, TSV, Markdown",
     )
 
-    if uploaded_files:
-        if st.button("📥 Ingest files", use_container_width=True):
-            model = load_embed_model()
-            all_chunks = []
-            progress = st.progress(0)
-            for i, f in enumerate(uploaded_files):
+    if files:
+        if st.button("⚡ Ingest & Index", use_container_width=True, type="primary"):
+            model = load_embed()
+            all_chunks, bar = [], st.progress(0)
+            log = st.empty()
+            for i, f in enumerate(files):
                 ext = Path(f.name).suffix.lower()
                 parser = PARSERS.get(ext)
                 if parser:
                     try:
-                        new_chunks = parser(f, f.name)
-                        all_chunks.extend(new_chunks)
-                        st.write(f"✓ {f.name} → {len(new_chunks)} chunks")
+                        nc = parser(f, f.name)
+                        all_chunks.extend(nc)
+                        log.markdown(f"<div class='ingest-ok'>✓ {f.name} — {len(nc)} chunks</div>", unsafe_allow_html=True)
                     except Exception as e:
-                        st.warning(f"⚠️ {f.name}: {e}")
-                else:
-                    st.warning(f"⚠️ Unsupported format: {f.name}")
-                progress.progress((i + 1) / len(uploaded_files))
+                        st.warning(f"⚠ {f.name}: {e}")
+                bar.progress((i+1)/len(files))
 
             if all_chunks:
                 with st.spinner("Building vector index…"):
-                    index, embeddings = build_index(all_chunks, model)
-                st.session_state["chunks"]     = all_chunks
-                st.session_state["index"]      = index
-                st.session_state["embeddings"] = embeddings
-                st.session_state["embed_model"] = model
-                st.success(f"✅ {len(all_chunks)} chunks indexed from {len(uploaded_files)} file(s)")
+                    idx, emb = build_index(all_chunks, model)
+                st.session_state.update({"chunks": all_chunks, "index": idx,
+                                          "embeddings": emb, "embed_model": model})
+                log.empty(); bar.empty()
+                st.success(f"✅ {len(all_chunks)} chunks · {len(files)} files")
             else:
-                st.error("No chunks extracted — check file formats.")
+                st.error("No content extracted.")
 
-    # Stats
+    # ── stats ─────────────────────────────────────────────────
     if st.session_state["chunks"]:
         st.divider()
-        st.metric("Chunks indexed", len(st.session_state["chunks"]))
-        st.metric("Files with tables", len(st.session_state["dataframes"]))
+        c1, c2 = st.columns(2)
+        c1.markdown(f"<div class='stat'><b>{len(st.session_state['chunks'])}</b><span>Chunks</span></div>", unsafe_allow_html=True)
+        c2.markdown(f"<div class='stat'><b>{len(st.session_state['dataframes'])}</b><span>Tables</span></div>", unsafe_allow_html=True)
+        st.divider()
 
-    # Clear button
-    if st.button("🗑️ Clear everything", use_container_width=True):
-        for k in ["chunks", "index", "embeddings", "chat_history", "dataframes", "embed_model"]:
-            st.session_state[k] = [] if k in ("chunks", "chat_history") else ({} if k == "dataframes" else None)
+    # ── clear ─────────────────────────────────────────────────
+    if st.button("🗑 Clear all", use_container_width=True):
+        for k in ["chunks","index","embeddings","history","dataframes","embed_model"]:
+            st.session_state[k] = [] if k in ("chunks","history") else ({} if k=="dataframes" else None)
         st.rerun()
 
-# ============================================================
-# MAIN CHAT UI
-# ============================================================
+# ════════════════════════════════════════════════════════════
+# MAIN AREA
+# ════════════════════════════════════════════════════════════
+st.markdown("# 🔍 DataIntern")
+st.markdown("<p style='color:#8892b0;margin-top:-12px'>Ask questions about your business data — cited answers & live charts</p>", unsafe_allow_html=True)
 
-st.title("📊 DataIntern — CRM & Business Data Chatbot")
-st.caption("Ask questions about your uploaded files. Get cited answers + live charts.")
-
-# Show starter suggestions if no conversation yet
-if not st.session_state["chat_history"]:
-    st.info("👆 Upload your files in the sidebar and click **Ingest files**, then ask anything below.")
-    cols = st.columns(2)
-    suggestions = [
-        "What was the total closed-won revenue?",
-        "Who is the top rep by pipeline value?",
-        "Show me a bar chart of deals by stage",
-        "List the at-risk accounts",
-        "Which lead sources convert best?",
-        "Does the PDF contract total match the deals sheet?",
+# ── empty state ───────────────────────────────────────────────
+if not st.session_state["history"]:
+    st.markdown("---")
+    st.markdown("#### Try asking…")
+    SUGGESTIONS = [
+        ("💰", "What was the total closed-won revenue?"),
+        ("🏆", "Who is the top rep by pipeline value?"),
+        ("📊", "Show me a bar chart of deals by stage"),
+        ("⚠️", "List the at-risk accounts"),
+        ("🔗", "Does the PDF contract total match the deals sheet?"),
+        ("📈", "Which lead sources convert best?"),
     ]
-    for i, s in enumerate(suggestions):
-        if cols[i % 2].button(s, use_container_width=True, key=f"sug_{i}"):
-            st.session_state["_pending_question"] = s
-            st.rerun()
+    cols = st.columns(3)
+    for i, (icon, s) in enumerate(SUGGESTIONS):
+        with cols[i % 3]:
+            st.markdown("<div class='sug-btn'>", unsafe_allow_html=True)
+            if st.button(f"{icon} {s}", use_container_width=True, key=f"sug{i}"):
+                st.session_state["_q"] = s
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("<p style='text-align:center;color:#4a4e6a;font-size:0.8rem'>Upload files in the sidebar → click Ingest & Index → start chatting</p>", unsafe_allow_html=True)
 
-# Render existing chat history
-for turn in st.session_state["chat_history"]:
-    with st.chat_message(turn["role"]):
+# ── chat history ──────────────────────────────────────────────
+for turn in st.session_state["history"]:
+    with st.chat_message(turn["role"], avatar="👤" if turn["role"]=="user" else "🔍"):
         st.markdown(turn["content"])
-        # Show source pills
         if turn.get("sources"):
-            src_html = " ".join(f'<span class="source-pill">📄 {s}</span>' for s in turn["sources"])
-            st.markdown(src_html, unsafe_allow_html=True)
-        # Re-render chart if stored
-        if turn.get("figure"):
-            st.plotly_chart(turn["figure"], use_container_width=True)
+            st.markdown(" ".join(f"<span class='pill'>📄 {s}</span>" for s in turn["sources"]), unsafe_allow_html=True)
+        if turn.get("fig"):
+            st.plotly_chart(turn["fig"], use_container_width=True)
 
-# ── chat input ───────────────────────────────────────────────
-question = st.chat_input("Ask about your data…") or st.session_state.pop("_pending_question", None)
+# ── input ─────────────────────────────────────────────────────
+question = st.chat_input("Ask about your data…") or st.session_state.pop("_q", None)
 
 if question:
-    # Guard checks
-    if not st.session_state["gemini_ready"]:
-        st.error("Please enter a valid Gemini API key in the sidebar first.")
+    if not st.session_state["ready"]:
+        st.error("Add your Gemini API key in the sidebar first.")
         st.stop()
     if not st.session_state["chunks"]:
-        st.error("Please upload and ingest at least one file first.")
+        st.error("Upload and ingest files first.")
         st.stop()
 
-    # Show user message
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar="👤"):
         st.markdown(question)
-    st.session_state["chat_history"].append({"role": "user", "content": question})
+    st.session_state["history"].append({"role": "user", "content": question})
 
-    # Retrieve + generate
-    with st.chat_message("assistant"):
-        with st.spinner("Searching your files…"):
-            retrieved = retrieve(
-                question,
-                st.session_state["embed_model"],
-                st.session_state["index"],
-                st.session_state["embeddings"],
-                st.session_state["chunks"],
-            )
+    with st.chat_message("assistant", avatar="🔍"):
+        with st.spinner("Searching…"):
+            ctx = retrieve(question, st.session_state["embed_model"],
+                           st.session_state["index"], st.session_state["embeddings"],
+                           st.session_state["chunks"])
+        with st.spinner("Thinking…"):
+            raw = ask(question, ctx, st.session_state["history"])
 
-        with st.spinner("Generating answer…"):
-            answer = ask_gemini(question, retrieved, st.session_state["chat_history"])
+        display = re.sub(r"```chart.*?```", "", raw, flags=re.DOTALL).strip()
+        st.markdown(display)
 
-        # Clean up the chart spec block from displayed answer
-        display_answer = re.sub(r"```chart.*?```", "", answer, flags=re.DOTALL).strip()
-        st.markdown(display_answer)
+        sources = list(dict.fromkeys(c["source"] for c in ctx))
+        st.markdown(" ".join(f"<span class='pill'>📄 {s}</span>" for s in sources), unsafe_allow_html=True)
 
-        # Unique sources cited
-        sources = list(dict.fromkeys(c["source"] for c in retrieved))
-        src_html = " ".join(f'<span class="source-pill">📄 {s}</span>' for s in sources)
-        st.markdown(src_html, unsafe_allow_html=True)
-
-        # Chart rendering
         fig = None
-        if _wants_chart(question):
-            with st.spinner("Rendering chart…"):
-                fig = render_chart(question, answer)
+        if wants_chart(question):
+            fig = render_chart(question, raw)
             if fig:
+                fig.update_layout(
+                    paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
+                    font_color="#c0c4d6", title_font_color="#e0e0e0",
+                )
                 st.plotly_chart(fig, use_container_width=True)
 
-    # Store in history
-    st.session_state["chat_history"].append({
-        "role": "assistant",
-        "content": display_answer,
-        "sources": sources,
-        "figure": fig,
+    st.session_state["history"].append({
+        "role": "assistant", "content": display,
+        "sources": sources, "fig": fig,
     })
